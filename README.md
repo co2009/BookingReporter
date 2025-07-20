@@ -13,14 +13,14 @@ pip install pandas numpy openpyxl xlrd xlsxwriter
 ## Структура проекта
 
 ```
-└── config/                 
-    ├── apartments.xlsx        # Информация об апартаментах
-    ├── platforms.xlsx         # Данные о платформах бронирования
-└── xls/
-    ├── bookings_YYYY_MM.xlsx  # Данные бронирований
-    ├── expenses_YYYY_MM.xlsx  # Данные расходов
-├── output/                    # Генерируемые отчеты
-└── booking.py                 # Основной скрипт
+├── config/
+│ ├── apartments.xlsx # Информация об апартаментах
+│ └── platforms.xlsx # Данные о платформах бронирования
+├── xls/
+│ ├── bookings_YYYY_MM.xlsx # Данные бронирований
+│ └── expenses_YYYY_MM.xlsx # Данные расходов
+├── output/ # Генерируемые отчеты
+└── booking.py # Основной скрипт
 ```
 
 ## Запуск
