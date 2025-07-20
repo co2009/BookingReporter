@@ -12,6 +12,7 @@ pip install pandas numpy openpyxl xlrd xlsxwriter
 
 ## Структура проекта
 
+```
 └── config/                 
     ├── apartments.xlsx        # Информация об апартаментах
     ├── platforms.xlsx         # Данные о платформах бронирования
@@ -20,6 +21,7 @@ pip install pandas numpy openpyxl xlrd xlsxwriter
     ├── expenses_YYYY_MM.xlsx  # Данные расходов
 ├── output/                    # Генерируемые отчеты
 └── booking.py                 # Основной скрипт
+```
 
 ## Запуск
 ```bash
