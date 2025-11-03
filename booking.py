@@ -74,6 +74,7 @@ Alias: TypeAlias = str
 class Apartment:
     owner_percent : int
     fix_price: int
+    expenses: str
     cleaning: int
     clothes: int
     comment: str
@@ -83,13 +84,15 @@ Apartments: TypeAlias = Dict[Address, Apartment]
 Aliases: TypeAlias = Dict[Alias, Address]
 
 def read_apartments(xlsx_fpath : Path) -> (Apartments, Aliases):
-    df = pd.read_excel(xlsx_fpath).fillna({"Примечание": "", "Белье" : default_clothes_cost, "Уборка" : 1300, "ПроцентХозяину" : 70, "Фикс" : 0})
+    df = pd.read_excel(xlsx_fpath).fillna({"Примечание": "", "Расходы": "", "Белье" : default_clothes_cost, "Уборка" : 1300, "ПроцентХозяину" : 70, "Фикс" : 0})
 
     apartments : Apartments = {}
     aliases : Aliases = {}
     for row in df.itertuples():
         address = Address(row.Квартира).strip()
-        apartment = Apartment(int(row.ПроцентХозяину), int(row.Фикс), int(row.Уборка), int(row.Белье), str(row.Примечание), Alias(row.Псевдоним).strip())
+        apartment = Apartment(
+            int(row.ПроцентХозяину), int(row.Фикс), str(row.Расходы).strip(), int(row.Уборка), int(row.Белье), 
+            str(row.Примечание), Alias(row.Псевдоним).strip())
         apartments[address] = apartment
         aliases[apartment.alias] = address
 
@@ -125,6 +128,9 @@ def is_fix_pay_to_veraland(apartment : Apartment):
 
 def is_fix_pay_to_owner(apartment : Apartment):
     return apartment.owner_percent <= 0
+
+def is_common_expenses_for_apartment(apartment : Apartment):
+    return apartment.expenses == "Общие"
 
 def extend_expenses(expenses : Expenses, func, apartments: Apartments, aliases : Aliases) -> ExpenseAccounts:
     for alias, apartment_expenses in expenses.items():
@@ -445,13 +451,14 @@ def make_reports(fname_suffix: str, days_in_month : int):
         vera_land_tag = f"VeraLand {100 - apartment.owner_percent}%"
         fix_pay_to_owner : bool = is_fix_pay_to_owner(apartment)
         fix_pay_to_veraland : bool = is_fix_pay_to_veraland(apartment)
+        is_common_expenses : bool = is_common_expenses_for_apartment(apartment)
 
         # Создаем DataFrame с одной строкой
         empty_row = pd.DataFrame([[np.nan]*len(df_obj.columns)], columns=df_obj.columns)
 
         # Создаем DataFrame с расходами
-        temp_owner_expense_column_tag = "Расход" if not fix_pay_to_owner else "Расход VL"
-        temp_vera_land_expense_column_tag = "Расход VL" if not fix_pay_to_veraland else "Расход"
+        temp_owner_expense_column_tag = "Расход" if (not fix_pay_to_owner) or is_common_expenses else "Расход VL"
+        temp_vera_land_expense_column_tag = "Расход VL" if not fix_pay_to_veraland and not is_common_expenses else "Расход"
 
         kpb_and_cleaning_counts = KpbAndCleaningCounts()
         expense_of_owner_df = make_expenses_df(
@@ -462,8 +469,14 @@ def make_reports(fname_suffix: str, days_in_month : int):
         expense_of_owner_sum_raw = nan_to_zero(expense_of_owner_df[temp_owner_expense_column_tag].sum())
         expense_of_vera_land_sum_raw = nan_to_zero(expense_of_vera_land_df[temp_vera_land_expense_column_tag].sum())
         total_expense_sum_raw = expense_of_owner_sum_raw + expense_of_vera_land_sum_raw
-        expense_of_owner_sum =  0 if fix_pay_to_owner else total_expense_sum_raw if fix_pay_to_veraland else expense_of_owner_sum_raw
-        expense_of_vera_land_sum =  0 if fix_pay_to_veraland else total_expense_sum_raw if fix_pay_to_owner else expense_of_vera_land_sum_raw
+
+        if is_common_expenses:
+            expense_of_owner_sum = (int)(total_expense_sum_raw * apartment.owner_percent / 100.0)
+            expense_of_vera_land_sum = total_expense_sum_raw - expense_of_owner_sum
+        else:
+            expense_of_owner_sum =  0 if fix_pay_to_owner else total_expense_sum_raw if fix_pay_to_veraland else expense_of_owner_sum_raw
+            expense_of_vera_land_sum =  0 if fix_pay_to_veraland else total_expense_sum_raw if fix_pay_to_owner else expense_of_vera_land_sum_raw
+
 
         # Создаем итоговую строку с суммами
         summary_data = {
