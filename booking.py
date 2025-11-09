@@ -122,6 +122,7 @@ Expenses : TypeAlias = Dict[Alias,ApartmentExpenses]
 class ExpenseAccounts:
     vera_land: Expenses = field(default_factory=lambda: defaultdict(ApartmentExpenses))
     owner: Expenses = field(default_factory=lambda: defaultdict(ApartmentExpenses))
+    common: Expenses = field(default_factory=lambda: defaultdict(ApartmentExpenses))
 
 def is_fix_pay_to_veraland(apartment : Apartment):
     return apartment.owner_percent >= 100
@@ -132,7 +133,7 @@ def is_fix_pay_to_owner(apartment : Apartment):
 def is_common_expenses_for_apartment(apartment : Apartment):
     return apartment.expenses == "Общие"
 
-def extend_expenses(expenses : Expenses, func, apartments: Apartments, aliases : Aliases) -> ExpenseAccounts:
+def extend_expenses(expenses : Expenses, func, apartments: Apartments, aliases : Aliases):
     for alias, apartment_expenses in expenses.items():
         address = aliases.get(alias, None)
         apartment = apartments.get(address)
@@ -155,6 +156,7 @@ def read_expenses(xlsx_fpath : Path, global_apartments: Apartments, global_alias
 
     categories_owner = {"Стартовое вложение", "КУ"}
     categories_vera_land = {"Расходники","Прочие расходы агенства","Уборка коридора","Продвижение"}
+    categories_common = categories_vera_land
 
     for _, row in df.iterrows():
         apartments = [apt.strip() for apt in row.Квартира.split(";") if apt.strip()]
@@ -175,7 +177,9 @@ def read_expenses(xlsx_fpath : Path, global_apartments: Apartments, global_alias
             expenses = expense_accounts.owner
         elif category in categories_vera_land:
             expenses = expense_accounts.vera_land
-        else :
+        else:
+            if category != "Уборка":
+                log.add(f'Неизвестная категория расхода "{category}" для {", ".join(f"{k}:{v}" for k, v in row.items())}')
             continue
 
         comment = row.Комментарий
@@ -201,8 +205,13 @@ def read_expenses(xlsx_fpath : Path, global_apartments: Apartments, global_alias
                 log.add(f'Нет квартиры {apartment} для {", ".join(f"{k}:{v}" for k, v in row.items())}')
                 continue
 
-            expenses[apartment].expenses.append(expense)
-            expenses[apartment].total_cost += expense.cost
+            apartment_info : Apartment = global_apartments[global_aliases[apartment]]
+            is_common_expenses = apartment_info.expenses == "Общие" and category in categories_common;
+
+            concrete_expenses = expense_accounts.common if is_common_expenses else expenses
+
+            concrete_expenses[apartment].expenses.append(expense)
+            concrete_expenses[apartment].total_cost += expense.cost
 
     extend_expenses(expense_accounts.owner, is_fix_pay_to_veraland, global_apartments, global_aliases)
     extend_expenses(expense_accounts.vera_land, is_fix_pay_to_owner, global_apartments, global_aliases)
@@ -270,12 +279,16 @@ def add_expense(df_main : pd.DataFrame, expense_column_tag : str, expenses_rows,
 def make_expenses_df(
         address : Address, 
         expense_column_tag : str,
+        common_expenses : int,
         add_kpb_n_cleaning : bool,
         kpb_and_cleaning_counts : KpbAndCleaningCounts,
         df_main : pd.DataFrame, 
         apartment_expenses : ApartmentExpenses) -> pd.DataFrame:
 
     expenses_rows = []
+
+    if common_expenses:
+        add_expense( df_main, expense_column_tag, expenses_rows, common_expenses, "Общие")
 
     if add_kpb_n_cleaning:
         add_expense( df_main, expense_column_tag, expenses_rows, *count_kpbs_with_costs(df_main['Комментарии'], kpb_and_cleaning_counts))
@@ -286,6 +299,7 @@ def make_expenses_df(
 
     if expenses_rows:
         return pd.DataFrame(expenses_rows)[df_main.columns]
+    
     return pd.DataFrame(columns=df_main.columns)
     
 
@@ -333,6 +347,8 @@ def save_to_excel(xlsx_path, result_df):
             max_len = max(result_df[col].astype(str).map(len).max(), len(col))
             sheet.set_column(idx, idx, max_len + 2)
 
+
+common_expense_column_tag : str = "Общий расход"
 
 def make_reports(fname_suffix: str, days_in_month : int):
     print("\n")
@@ -429,6 +445,7 @@ def make_reports(fname_suffix: str, days_in_month : int):
             "Расход VL": int(expense) if is_fix_pay_to_owner(apartment) else 0,
             owner_title: int(net_pay * owner_percent / 100.0),
             "Расход": 0 if is_fix_pay_to_owner(apartment) else int(expense),
+            common_expense_column_tag : 0,
             "Комментарии": report_comment,
             "Заезд": row.Заезд,
             "Выезд": row.Выезд,
@@ -457,26 +474,30 @@ def make_reports(fname_suffix: str, days_in_month : int):
         empty_row = pd.DataFrame([[np.nan]*len(df_obj.columns)], columns=df_obj.columns)
 
         # Создаем DataFrame с расходами
-        temp_owner_expense_column_tag = "Расход" if (not fix_pay_to_owner) or is_common_expenses else "Расход VL"
-        temp_vera_land_expense_column_tag = "Расход VL" if not fix_pay_to_veraland and not is_common_expenses else "Расход"
+        temp_owner_expense_column_tag = "Расход" if not fix_pay_to_owner else "Расход VL"
+        temp_vera_land_expense_column_tag = "Расход VL" if not fix_pay_to_veraland else "Расход"
 
         kpb_and_cleaning_counts = KpbAndCleaningCounts()
+
+        common_expense_df = make_expenses_df(
+            address, common_expense_column_tag, 0, is_common_expenses, kpb_and_cleaning_counts, df_obj, expense_accounts.common.get(apartment.alias,ApartmentExpenses()))
+        common_expense_sum = nan_to_zero(common_expense_df[common_expense_column_tag].sum())
+        common_expense_sum_owner = (int)(common_expense_sum * apartment.owner_percent / 100.0)
+        common_expense_sum_vera_land = common_expense_sum - common_expense_sum_owner
+
         expense_of_owner_df = make_expenses_df(
-            address, temp_owner_expense_column_tag, True, kpb_and_cleaning_counts, df_obj, expense_accounts.owner.get(apartment.alias,ApartmentExpenses()))
+            address, temp_owner_expense_column_tag, common_expense_sum_owner, not is_common_expenses, 
+            kpb_and_cleaning_counts, df_obj, expense_accounts.owner.get(apartment.alias,ApartmentExpenses()))
         expense_of_vera_land_df = make_expenses_df(
-            address, temp_vera_land_expense_column_tag, False, kpb_and_cleaning_counts, df_obj, expense_accounts.vera_land.get(apartment.alias,ApartmentExpenses()))
+            address, temp_vera_land_expense_column_tag, common_expense_sum_vera_land, False, 
+            kpb_and_cleaning_counts, df_obj, expense_accounts.vera_land.get(apartment.alias,ApartmentExpenses()))
 
         expense_of_owner_sum_raw = nan_to_zero(expense_of_owner_df[temp_owner_expense_column_tag].sum())
         expense_of_vera_land_sum_raw = nan_to_zero(expense_of_vera_land_df[temp_vera_land_expense_column_tag].sum())
         total_expense_sum_raw = expense_of_owner_sum_raw + expense_of_vera_land_sum_raw
 
-        if is_common_expenses:
-            expense_of_owner_sum = (int)(total_expense_sum_raw * apartment.owner_percent / 100.0)
-            expense_of_vera_land_sum = total_expense_sum_raw - expense_of_owner_sum
-        else:
-            expense_of_owner_sum =  0 if fix_pay_to_owner else total_expense_sum_raw if fix_pay_to_veraland else expense_of_owner_sum_raw
-            expense_of_vera_land_sum =  0 if fix_pay_to_veraland else total_expense_sum_raw if fix_pay_to_owner else expense_of_vera_land_sum_raw
-
+        expense_of_owner_sum =  0 if fix_pay_to_owner else total_expense_sum_raw if fix_pay_to_veraland else expense_of_owner_sum_raw
+        expense_of_vera_land_sum =  0 if fix_pay_to_veraland else total_expense_sum_raw if fix_pay_to_owner else expense_of_vera_land_sum_raw
 
         # Создаем итоговую строку с суммами
         summary_data = {
@@ -484,10 +505,22 @@ def make_reports(fname_suffix: str, days_in_month : int):
             **df_obj.select_dtypes(include='number').sum().to_dict(),
             'Расход': expense_of_owner_sum,
             'Расход VL': expense_of_vera_land_sum,
+            common_expense_column_tag : 0,
             '%': np.nan,
             **{col: '' for col in df_obj.select_dtypes(exclude='number').columns if col not in ['Источник брони']}
         }
         
+        # Создаем итоговую строку общих расходов
+        summary_common_expenses_data = {
+            **{col: '' for col in df_obj.columns},
+            'Расход': common_expense_sum_owner,
+            'Расход VL': common_expense_sum_vera_land,
+            common_expense_column_tag : common_expense_sum,
+            'Комментарии': "Итого"
+        }
+
+        summary_common_expenses_df = pd.DataFrame([summary_common_expenses_data])[df_obj.columns]
+
         # Создаем итоговую строку расходов собственника
         summary_owner_expenses_data = {
             **{col: '' for col in df_obj.columns},
@@ -531,12 +564,17 @@ def make_reports(fname_suffix: str, days_in_month : int):
         final_df = pd.DataFrame([final_data])[df_obj.columns]
 
         # Приводим числовые колонки к целым числам
+        common_df_list = [common_expense_df, summary_common_expenses_df, empty_row] if is_common_expenses else []
         result_df = pd.concat([
             df_obj, empty_row, 
+            *common_df_list, 
             expense_of_owner_df, summary_owner_expenses_df, empty_row, 
             expense_of_vera_land_df, summary_vera_land_expenses_df, empty_row, 
             summary_df, empty_row, 
             final_df], ignore_index=True)
+
+        if not is_common_expenses:
+            result_df = result_df.drop(columns=[common_expense_column_tag])
 
         print(f"\nОбъект: {address}", end = "")
         if apartment.comment:
