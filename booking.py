@@ -20,20 +20,98 @@ warnings : Set[str] = set()
 def nan_to_zero(value : float) -> float:
     return 0.0 if np.isnan(value) else value
 
-def find_kpb(s, default_value: int) -> int:
-    match = re.search(r'(\d+)КПБ', s)
+def guests_count_from_comment(comment:str, row) -> int:
+    if not 'гост' in comment.lower():
+        return 0
+    
+    guests_variants = [
+        r'гостей',
+        r'гостя',
+        r'гости',
+        r'гость',
+    ]
+    
+    # Собираем все варианты в один паттерн
+    guests_pattern = '|'.join(guests_variants)
+    
+    patterns = [
+        # Слово "гость" (в любом падеже) + число
+        rf'({guests_pattern})\s*[:]?\s*(\d+)',  # Гостей: 3, Гостя 3
+        rf'(\d+)\s*({guests_pattern})',          # 3 Гостей, 5 Гостя
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, comment, re.IGNORECASE)
+        if match:
+            # Находим группу с числом
+            for group in match.groups():
+                try:
+                    return int(group)
+                except (ValueError, TypeError):
+                    continue
+
+    adults_match = re.search(r'взрослых\s*(\d+)', comment, re.IGNORECASE)
+    children_match = re.search(r'детей\s*(\d+)', comment, re.IGNORECASE)
+
+    try:
+        adults = int(adults_match.group(1)) if adults_match else 0
+        children = int(children_match.group(1)) if children_match else 0
+        return adults + children
+    except (ValueError, TypeError):
+        warnings.add(f'Плохой формат для взрослых и детей в "{comment}" для {", ".join(f"{k}:{v}" for k, v in row.items())}')
+        return 0
+    
+    warnings.add(f'Нет информации по количеству гостей в "{comment}" для {", ".join(f"{k}:{v}" for k, v in row.items())}')
+
+
+def find_kpb(comment:str, row, default_value: int) -> int:
+    match = re.search(r'(\d+)КПБ', comment)
     if match:
         return int(match.group(1))
 
+    if not default_value:
+        return 0
+
+    row_guest_count_str = row.Гостей
+    if not pd.isna(row_guest_count_str):
+        row_guest_count = int(row_guest_count_str)
+        return (row_guest_count + 1) // 2
+    
+    comment_guest_count_str = guests_count_from_comment(comment, row)
+    if comment_guest_count_str:
+        return (comment_guest_count_str + 1) // 2
+
     return default_value
 
-def extract_service_percent(s):
-    match = re.search(r'КОМПЛАТ=(\d+\.?\d*)%', s)  # \d+\.?\d* — одна точка или ни одной
+class BookingsTableTill202606:
+    header = 0
+    Объект = "Объект"
+
+class BookingsTable:
+    header = 1
+    Объект = "Адрес"
+    Комиссия ="Комиссия"
+
+PlatformsInfo: TypeAlias = dict[str,float]
+
+def read_platforms_info(xlsx_fpath : Path) -> PlatformsInfo:
+    df = pd.read_excel(xlsx_fpath)
+
+    platforms_info = dict[str,float]()
+    for row in df.itertuples():
+        platforms_info[row.Платформа.lower()] = row.Комиссия
+
+    return platforms_info
+
+def extract_service_percent(comment:str):
+    match = re.search(r'КОМПЛАТ=(\d+\.?\d*)%', comment)  # \d+\.?\d* — одна точка или ни одной
     if not match:
-        match = re.search(r'КОМПЛАТ=(\d+\.?\d*)', s)  # \d+\.?\d* — одна точка или ни одной
+        match = re.search(r'КОМПЛАТ=(\d+\.?\d*)', comment)  # \d+\.?\d* — одна точка или ни одной
         if match:
-            log.add(f'Нет символа % для КОМПЛАТ для "{s}"')
-        
+            log.add(f'Нет символа % для КОМПЛАТ для "{comment}"')
+        elif 'КОМПЛАТ' in comment.upper():
+            log.add(f'Плохой КОМПЛАТ для "{comment}"')
+
         return -1
     
     service_fee = float(match.group(1))
@@ -41,6 +119,35 @@ def extract_service_percent(s):
         return -1
     
     return service_fee
+
+def calculate_service_fee_and_percent(
+        row, platform:str, platforms_info: PlatformsInfo, total_pay : float, nights_count : int, comment : str):
+
+    service_fee = row[BookingsTable.Комиссия]
+
+    if not pd.isna(service_fee):
+        service_fee = float(service_fee)
+        if service_fee > 0.1:
+            service_percent = int(service_fee / total_pay * 100.0 * 100.0) / 100.0
+            return service_fee, service_percent
+        elif total_pay / nights_count < 2.0:
+            return 0.0, 0.0 # Заезжали хозяева (по рублю за ночь). Оставляем бронь из-за КПБ и уборки
+            
+
+    if not platform in ['корзина','basket','модуль бронирования']:
+        warnings.add(f'Нет комиссии платформы (данные будут рассчитаны через КОМПЛАТ или таблицу платформ) для {", ".join(f"{k}:{v}" for k, v in row.items())}')
+
+    service_percent = extract_service_percent(comment)
+    
+    if service_percent < 0.0 and platform in platforms_info:
+        service_percent = platforms_info[platform]
+
+    if service_percent < 0.0:
+        log.add(f'Неизвестный процент (нет ни Комиссии, ни КОМПЛАТ, ни платформы) для {", ".join(f"{k}:{v}" for k, v in row.items())}')
+
+    service_fee = total_pay * service_percent / 100.0
+    return service_fee, service_percent
+
 
 def extract_extra_pay(s):
     match = re.search(r'ДОП(П?)ЛАТА=(\d+)', s)
@@ -53,17 +160,8 @@ def extract_discount(s):
 def extract_platform_name(s):
     match = re.search(r'Забронировано через\s+([^\s\n]+)', s.strip(), re.IGNORECASE)
     if match:
-        return match.group(1)
+        return match.group(1).lower()
     return ""    
-
-def read_platforms_info(xlsx_fpath : Path) -> dict[str,float]:
-    df = pd.read_excel(xlsx_fpath)
-
-    platforms_info = dict[str,float]()
-    for row in df.itertuples():
-        platforms_info[row.Платформа] = row.Комиссия
-
-    return platforms_info
 
 default_clothes_cost : int = 1000
 
@@ -157,6 +255,9 @@ def read_expenses(xlsx_fpath : Path, global_apartments: Apartments, global_alias
     categories_owner = {"Стартовое вложение", "КУ"}
     categories_vera_land = {"Расходники","Прочие расходы агенства","Уборка коридора","Продвижение"}
     categories_common = categories_vera_land
+
+    for alias in global_aliases:
+        expense_accounts.owner[alias].total_cost = 0.0
 
     for _, row in df.iterrows():
         apartments = [apt.strip() for apt in row.Квартира.split(";") if apt.strip()]
@@ -318,6 +419,7 @@ def summary_to_pivot(
     pivot_dict["Итог VL"] = summary_data[vera_land_tag] - summary_data["Расход VL"]
     pivot_dict["Собственнику"] = summary_data[owner_tag]
     pivot_dict["Расход"] = summary_data["Расход"]
+    pivot_dict["Итог"] = summary_data[owner_tag] - summary_data["Расход"]
     pivot_dict["КПБ"] = kpb_and_cleaning_counts.kpbs
     pivot_dict["Уборок"] = kpb_and_cleaning_counts.cleanings
     pivot_dict["Ночей"] = int(summary_data["Ночей"])
@@ -353,7 +455,8 @@ common_expense_column_tag : str = "Общий расход"
 def make_reports(fname_suffix: str, days_in_month : int):
     print("\n")
 
-    platforms_info = read_platforms_info('config/platforms.xlsx')
+    platforms_info_fpath = 'config/platforms.xlsx'
+    platforms_info = read_platforms_info(platforms_info_fpath)
     print(platforms_info)
 
     apartments, aliases = read_apartments('config/apartments.xlsx')
@@ -366,18 +469,36 @@ def make_reports(fname_suffix: str, days_in_month : int):
     xls_path = Path(__file__).absolute().parent / f'xls/bookings_{fname_suffix}.xlsx'
     print("\nFile Path:", xls_path)
 
-    df_whole = pd.read_excel(xls_path).fillna({"Источник": ""})
+    df_whole = pd.read_excel(xls_path, header = BookingsTable.header).fillna({"Источник": ""})
 
     print(df_whole)
 
     reports_dict = defaultdict(list)
 
     for _, row in df_whole.iterrows():
-        address : Address = row.Объект
+        address : Address = row[BookingsTable.Объект]
         apartment : Apartment = apartments.get(address)
 
         if not apartment:
             log.add(f"Нет апартамента для {address}")
+            continue
+
+        status = row.Статус
+        if status in ['Отменено','Удалено']:
+            continue
+
+        if status != 'Бронь':
+            log.add(f'Неизвестный статус {status} для {", ".join(f"{k}:{v}" for k, v in row.items())}')
+
+        check_in_date_str =  row.Заезд
+        check_in_date =  pd.to_datetime(check_in_date_str, format='%d.%m.%Y')
+        year, month = map(int, args.date.split('_'))
+        if month != check_in_date.month:
+            is_prev_month : bool = month + year * 12 == 1 + check_in_date.month + check_in_date.year * 12
+            is_1st_jan = year == check_in_date.year and check_in_date.month == 1 and check_in_date.day == 1
+
+            if not (is_prev_month or is_1st_jan) :
+                log.add(f'Странная дата {check_in_date.strftime("%d.%m.%Y")} для {", ".join(f"{k}:{v}" for k, v in row.items())}')
             continue
 
         raw_comment = (str)(row.Примечания)
@@ -385,8 +506,10 @@ def make_reports(fname_suffix: str, days_in_month : int):
 
         total_pay = row.Сумма
 
+        nights_count = calculate_nights(row)
+
         kpb_cost = apartment.clothes if apartment else default_clothes_cost
-        kpb_count = find_kpb(comment, 1 if total_pay > 0 else 0)
+        kpb_count = find_kpb(comment, row, 1 if total_pay > 0 else 0)
 
         cleaning = 0 if ("УБОХОЗ" in comment) else apartment.cleaning if apartment else 1300
 
@@ -399,35 +522,36 @@ def make_reports(fname_suffix: str, days_in_month : int):
                 report_comment += ","
             report_comment += f"Уборка({cleaning})"
 
-        platform : str = row.Источник
-        if not platform:
-            platform = extract_platform_name(comment)
-
-        if not platform or platform == 'manual':
-            if row.Менеджер == "bookings_widget@tutt.ru":
-                platform = "Модуль бронирования"
-
-        if not platform:
-            log.add(f'Нет платформы для {", ".join(f"{k}:{v}" for k, v in row.items())}')
-
-        service_percent = extract_service_percent(comment)
-
-        if service_percent < 0.0 and platform in platforms_info:
-            service_percent = platforms_info[platform]
-
-        if service_percent < 0.0:
-            service_percent = 15.0
-
         if total_pay <= 0:
+            # Судя по цене это поздний выезд, он записан в доплату по основной брони, здесь эту псевдо-бронь пропускаем. 
+            # М.б. стоит в будущем добавить проверку в комменте
             if kpb_count > 0:
                 warnings.add(f'Расходы без доходов для {", ".join(f"{k}:{v}" for k, v in row.items())}')
             else:
                 continue
 
+        platform : str = row.Источник.lower()
+        if not platform:
+            platform = extract_platform_name(comment)
+
+        if not platform or platform == 'manual':
+            if row.Менеджер in ["bookings_widget@tutt.ru","Вера Еналиева"]:
+                platform = "модуль бронирования"
+
+        if not platform:
+            log.add(f'Нет платформы для {", ".join(f"{k}:{v}" for k, v in row.items())}')
+
+        if not platform in platforms_info:
+            log.add(f'Нет платформы {platform} в {platforms_info_fpath} для {", ".join(f"{k}:{v}" for k, v in row.items())}')
+
         extra_pay : int = extract_extra_pay(comment)
         extra_pay -= extract_discount(comment)
 
-        service_fee = row.Сумма * service_percent / 100.0
+        service_fee, service_percent = calculate_service_fee_and_percent(
+            row, platform, platforms_info, total_pay, nights_count, comment)
+        if service_percent >= 40.0:
+            warnings.add(f'Слишком высокая комиссия ({service_percent}%) платформы {platform} для {", ".join(f"{k}:{v}" for k, v in row.items())}')
+
         net_pay = total_pay - service_fee + extra_pay
         
         owner_percent = apartment.owner_percent if apartment else 70
@@ -447,14 +571,14 @@ def make_reports(fname_suffix: str, days_in_month : int):
             "Расход": 0 if is_fix_pay_to_owner(apartment) else int(expense),
             common_expense_column_tag : 0,
             "Комментарии": report_comment,
-            "Заезд": row.Заезд,
+            "Заезд": check_in_date_str,
             "Выезд": row.Выезд,
-            "Ночей": calculate_nights(row),
+            "Ночей": nights_count,
         }
         reports_dict[address].append(report_row)
 
     # Создаем DataFrame для каждого объекта
-    dataframes = {k: pd.DataFrame(v) for k, v in reports_dict.items()}
+    dataframes = {k: pd.DataFrame(v).sort_values('Заезд', ascending=True) for k, v in reports_dict.items()}
 
     out_folder  = Path(f"./output/{fname_suffix}")
     out_folder.mkdir(parents=True, exist_ok=True)
@@ -595,7 +719,7 @@ def make_reports(fname_suffix: str, days_in_month : int):
 
     if pivot_data:
 
-        pivot_df = pd.DataFrame(pivot_data)
+        pivot_df = pd.DataFrame(pivot_data).sort_values('Адрес')
 
         summary_pivot_data = [{
             'Адрес': 'ИТОГО',
