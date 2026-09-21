@@ -1,3 +1,5 @@
+import utilities
+
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -507,6 +509,11 @@ def make_reports(fname_suffix: str, days_in_month : int):
         total_pay = row.Сумма
 
         nights_count = calculate_nights(row)
+        if nights_count > 99 and any(k in comment for k in ('ЗАКРЫТО', ' СРЕДНЕСРОК', ' ДОЛГОСРОК')):
+            continue
+
+        if nights_count > 31:
+            warnings.add(f'Очень большое количество ночей: {nights_count} для {", ".join(f"{k}:{v}" for k, v in row.items())}')
 
         kpb_cost = apartment.clothes if apartment else default_clothes_cost
         kpb_count = find_kpb(comment, row, 1 if total_pay > 0 else 0)
@@ -535,7 +542,7 @@ def make_reports(fname_suffix: str, days_in_month : int):
             platform = extract_platform_name(comment)
 
         if not platform or platform == 'manual':
-            if row.Менеджер in ["bookings_widget@tutt.ru","Вера Еналиева"]:
+            if row.Менеджер in ["bookings_widget@tutt.ru","Вера Еналиева","Вадим Еналиев"]:
                 platform = "модуль бронирования"
 
         if not platform:
@@ -740,32 +747,16 @@ def make_reports(fname_suffix: str, days_in_month : int):
     save_to_excel(xlsx_pivot_path, final_pivot_df)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Программа с параметром даты в формате yyyy_mm')
-    parser.add_argument(
-        'date',
-        type=str,
-        help='Дата в формате yyyy_mm (например: 2024_10)'
-    )
-    args = parser.parse_args()
-    
-    # Проверка формата даты
-    try:
-        year, month = map(int, args.date.split('_'))
-        datetime(year=year, month=month, day=1)  # Проверяем, что дата валидна
-    except (ValueError, IndexError):
-        parser.error("Неверный формат даты. Используйте yyyy_mm (например: 2024_10)")
-    
-    return args
-
 if __name__ == "__main__":
 
-    args = parse_args()
+    args = utilities.parse_args()
     yyyy_mm : str = args.date
     year, month = map(int, args.date.split('_'))
     days_in_month = calendar.monthrange(year, month)[1]
 
-    make_reports(yyyy_mm, days_in_month)
+    suffix = utilities.name_plus_suffix( yyyy_mm, args.suffix)
+
+    make_reports(suffix, days_in_month)
 
     if warnings:
         print("\033[33m")

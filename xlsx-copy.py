@@ -1,10 +1,9 @@
+import utilities
+
 import os
 from pathlib import Path
 import pandas as pd
-import xlrd2
 from bs4 import BeautifulSoup
-from datetime import datetime
-import argparse
 
 def ask_yes_no(question: str, default: bool = True) -> bool:
     choices = " [Y/n] " if default else " [y/N] "
@@ -44,7 +43,7 @@ def save_to_excel(xlsx_path, df):
     with pd.ExcelWriter(xlsx_path, engine='xlsxwriter', engine_kwargs={'options': {'nan_inf_to_errors': True}}) as writer:
         df.to_excel(writer, sheet_name="Отчет", index=False)
 
-def copy_concrete_file(fpath : Path, ext : Path, dest_suffix : str) -> bool:
+def copy_concrete_file(fpath : Path, ext : Path, dest_fname : Path, dest_suffix : str) -> bool:
     full_path : Path =  fpath.with_suffix(ext)
     print(f"Try to copy {full_path}")
     
@@ -52,7 +51,7 @@ def copy_concrete_file(fpath : Path, ext : Path, dest_suffix : str) -> bool:
         print(f"{full_path} does not exist")
         return False
 
-    dest_path = Path(f'xls/{full_path.stem}_{dest_suffix}.xlsx').resolve()
+    dest_path = Path(f'xls/{dest_fname}_{dest_suffix}.xlsx').resolve()
     if dest_path.exists():
         if not ask_yes_no(f"{dest_path} already exists. Overwrite?"):
             return False
@@ -63,42 +62,23 @@ def copy_concrete_file(fpath : Path, ext : Path, dest_suffix : str) -> bool:
         save_to_excel(dest_path, df)
         os.remove(full_path)
     else:
-        os.rename(full_path, dest_path)
+        os.replace(full_path, dest_path)
         
-    
     print(f"file moved from {full_path} to {dest_path}")
     return True
 
-def copy_file(fname : Path, ext : Path, dest_suffix : str) -> bool:
+def copy_file(fname : Path, ext : Path, dest_fname : Path, dest_suffix : str) -> bool:
     path : Path = get_downloads_path() / Path(fname)
     
-    if copy_concrete_file( path, ext, dest_suffix):
+    if copy_concrete_file( path, ext, dest_fname, dest_suffix):
         return False
     
     return True
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='Программа с параметром даты в формате yyyy_mm')
-    parser.add_argument(
-        'date',
-        type=str,
-        help='Дата в формате yyyy_mm (например: 2024_10)'
-    )
-    args = parser.parse_args()
-    
-    # Проверка формата даты
-    try:
-        year, month = map(int, args.date.split('_'))
-        datetime(year=year, month=month, day=1)  # Проверяем, что дата валидна
-    except (ValueError, IndexError):
-        parser.error("Неверный формат даты. Используйте yyyy_mm (например: 2024_10)")
-    
-    return args
-
 if __name__ == "__main__":
-    args = parse_args()
+    args = utilities.parse_args()
     yyyy_mm : str = args.date
+    suffix : str = args.suffix
     
-    copy_file("expenses", ".xlsx", yyyy_mm)
-    copy_file("bookings", ".xls", yyyy_mm)
+    copy_file("expenses", ".xlsx", "expenses", utilities.name_plus_suffix(yyyy_mm, suffix))
+    copy_file("bookings-report-21-09-2026", ".xlsx", "bookings", utilities.name_plus_suffix(yyyy_mm, suffix))

@@ -1,0 +1,4 @@
+output/
+xls/
+config/backup/
+__pycache__
